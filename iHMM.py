@@ -19,26 +19,31 @@ class InfiniteHiddenMarkovModel():
 
         # Emmisions
         self.emission_counts = {} # counts emission (njk)
+        self.emission_oracle_counts = {} # counts emission (noj)
         self.num_emissions = 0 # number of observation
 
-        self.state_sequence = []
+        self.state_sequence = [] # Hidden state sequence
 
 
     def initialize_state(self):
         """
         Initialize state
         """
-        self.num_states += 1
-        state_id = self.num_states
-        self.transition_counts[state_id] = {}
-        self.emission_counts[state_id] = {}
-        self.oracle_counts[state_id] = 0
-        return state_id
+        try:
+            self.num_states += 1
+            state_id = self.num_states
+            self.transition_counts[state_id] = {}
+            self.emission_counts[state_id] = {}
+            self.oracle_counts[state_id] = 0
+            return state_id
+        
+        except Exception as e:
+            raise Exception(f"Error in initialize_state: {str(e)}")
     
     def sample_next_state(self, current_state):
         """
-        Sample next state
-        Test: Cleared (All probabilities sum to 1)
+        Sample next state.
+        Test: Cleared (All probabilities sum to 1).
         """
         # Ensure that the current state exists
         if current_state is None or current_state not in self.transition_counts:
@@ -48,32 +53,33 @@ class InfiniteHiddenMarkovModel():
 
         # Calculating the transition probabilities
         total_transitions = sum(self.transition_counts[current_state].values())
+
+        # Calculating the denominator
         denominator = total_transitions + self.alpha + self.beta
+        if denominator == 0:
+            raise ValueError(f"Zero denominator in sample_next_state for state {current_state}")
 
-        probs = {}
-        # Probabilities of transitions from current_state to other states
-        for state, count in self.transition_counts[current_state].items():
-            probs[state] = count / denominator
+        # Calculate probabilities for existing states
+        probs = {
+            state: (count + (self.alpha if state == current_state else 0)) / denominator
+            for state, count in self.transition_counts[current_state].items()
+        }
 
-        # Probability of creating a new state
-        prob_new = self.beta / denominator
+        # Add oracle probability
+        prob_oracle = self.beta / denominator
+        probs["oracle"] = prob_oracle
 
-        # Probability of staying in the same state
-        probs[current_state] = (
-            self.alpha + self.transition_counts[current_state].get(current_state, 0)
-        ) / denominator
-
-        # Normalizing the probabilities
-        total_prob = sum(probs.values()) + prob_new
-        for state in probs:
-            probs[state] /= total_prob
-        prob_new /= total_prob
+        # Normalize probabilities to sum to 1
+        keys = list(probs.keys())
+        probabilities = np.array([probs[k] for k in keys])
+        probabilities /= probabilities.sum()
 
         # Sample next state
-        if np.random.rand() < prob_new:
+        sampled_key = np.random.choice(keys, p=probabilities)
+        if sampled_key == "oracle":
             next_state = self.consult_oracle()
         else:
-            next_state = np.random.choice(list(probs.keys()), p=list(probs.values()))
+            next_state = sampled_key
 
         # Update counts
         self.update_counts(current_state, next_state)
@@ -81,82 +87,124 @@ class InfiniteHiddenMarkovModel():
         
     def consult_oracle(self):
         """
-        Consult the oracle
+        Consult the oracle.
         """
-        total_oracle = sum(self.oracle_counts.values()) # Count of noj
-        prob_new = self.gamma / (total_oracle + self.gamma) # Probability of creating a new state
-        probs = {}
-        for state,count in self.oracle_counts.items(): 
-            probs[state] = count / (total_oracle + self.gamma)
+        total_oracle = sum(self.oracle_counts.values())  # Total count of oracle states
+        prob_new = self.gamma / (total_oracle + self.gamma)  # Probability of creating a new state
 
-        if np.random.rand() < prob_new:
-            # Create a new state with probability gamma
-            new_state =  self.initialize_state()
+        # Handle edge case where oracle counts are empty
+        if total_oracle == 0:
+            prob_new = 1.0
 
+        # Calculate probabilities for existing states
+        probs = {
+            state: count / (total_oracle + self.gamma)
+            for state, count in self.oracle_counts.items()
+        }
+
+        # Normalize probabilities to sum to 1
+        probs["new_state"] = prob_new
+        keys = list(probs.keys())
+        probabilities = np.array([probs[key] for key in keys])
+        probabilities /= probabilities.sum()
+
+        # Sample new state or an existing state
+        sampled_key = np.random.choice(keys, p=probabilities)
+        if sampled_key == "new_state":
+            new_state = self.initialize_state()
+            self.oracle_counts[new_state] = 1  # Initialize count for the new state
         else:
-            # Sample from the oracle
-            new_state = np.random.choice(list(probs.keys()),p=list(probs.values()))
+            new_state = sampled_key
 
+        # Increment count for the chosen state
         self.oracle_counts[new_state] += 1
         return new_state
     
-    def update_counts(self,current_state,next_state):
+    def update_counts(self, current_state, next_state):
         """
-        Update counts
+        Update counts for state transitions.
         """
+        # Ensure the current_state exists in transition_counts
+        if current_state not in self.transition_counts:
+            self.transition_counts[current_state] = {}
+
+        # Ensure the next_state exists in the dictionary for current_state
         if next_state not in self.transition_counts[current_state]:
             self.transition_counts[current_state][next_state] = 0
 
+        # Increment the transition count
         self.transition_counts[current_state][next_state] += 1
 
-    def sample_emission(self,state):
+    def sample_emission(self, state):
         """
-        Sample emission
+        Sample emission for a given state.
         """
-        # Ensure that the current observation exists
+        # Ensure the state exists in emission_counts
         if state not in self.emission_counts:
             self.emission_counts[state] = {}
-        
-        # Calculating the emission probabilities
+
+        # Calculate total emissions for the state
         total_emissions = sum(self.emission_counts[state].values())
 
-        probs = {}
-        # Probabilities of j to k
-        for emission,count in self.emission_counts[state].items():
-            probs[emission] = count / (total_emissions + self.beta0)
-        
-        # Probability of creating a new observation
-        prob_new = self.beta0 / (total_emissions + self.beta0)
-
-        # Sample next observation
-        if np.random.rand() < prob_new:
-            next_emission = self.create_new_emission()
-        
+        # Handle case where no emissions exist
+        if total_emissions == 0:
+            prob_new = 1.0  # All probability goes to creating a new observation
         else:
-            next_emission = np.random.choice(list(probs.keys()),p=list(probs.values()))
+            prob_new = self.beta0 / (total_emissions + self.beta0)
 
-        # Update emmision counts
-        self.update_emission_counts(state,next_emission)
+        # Calculate probabilities for existing emissions
+        probs = {
+            emission: count / (total_emissions + self.beta0)
+            for emission, count in self.emission_counts[state].items()
+        }
+
+        # Add the probability for creating a new observation
+        probs["new_emission"] = prob_new
+
+        # Normalize probabilities to sum to 1
+        keys = list(probs.keys())
+        probabilities = np.array([probs[key] for key in keys])
+        probabilities /= probabilities.sum()
+
+        # Sample next emission
+        sampled_key = np.random.choice(keys, p=probabilities)
+        if sampled_key == "new_emission":
+            next_emission = self.create_new_emission()
+        else:
+            next_emission = sampled_key
+
+        # Update emission counts
+        self.update_emission_counts(state, next_emission)
         return next_emission
     
     def create_new_emission(self):
         """
-        Create new emission
+        Create a new unique emission.
         """
+        if not hasattr(self, 'num_emissions'):
+            self.num_emissions = 0
+
         self.num_emissions += 1
         return f"obs_{self.num_emissions}"
     
     def update_emission_counts(self, state, emission):
         """
-        Update emission counts for a given state
+        Update emission counts for a given state.
         """
+        # Ensure the state exists in emission_counts
+        if state not in self.emission_counts:
+            self.emission_counts[state] = {}
+
+        # Ensure the emission exists in the dictionary for the state
         if emission not in self.emission_counts[state]:
             self.emission_counts[state][emission] = 0
+
+        # Increment the emission count
         self.emission_counts[state][emission] += 1
 
     def gibbs_sampling(self, observations, num_iter=1000):
         """
-        Gibbs sampling for hidden state sequence
+        Perform Gibbs sampling to infer the hidden state sequence in an iHMM.
         """
         if not observations:
             raise ValueError("Observations sequence cannot be empty")
@@ -175,65 +223,101 @@ class InfiniteHiddenMarkovModel():
                     self.transition_counts[prev_state][current_state] -= 1
                     if self.transition_counts[prev_state][current_state] == 0:
                         del self.transition_counts[prev_state][current_state]
-
                 if current_state in self.emission_counts:
                     self.emission_counts[current_state][observations[t]] -= 1
                     if self.emission_counts[current_state][observations[t]] == 0:
                         del self.emission_counts[current_state][observations[t]]
+                if current_state in self.transition_counts and next_state:
+                    self.transition_counts[current_state][next_state] -= 1
+                    if self.transition_counts[current_state][next_state] == 0:
+                        del self.transition_counts[current_state][next_state]
 
                 # Sample a new state
                 self.state_sequence[t] = self.sample_next_state(prev_state)
 
-                # Update transition and emission counts
+                # Update transition counts for the new state
                 if prev_state:
                     self.update_counts(prev_state, self.state_sequence[t])
+                if next_state:
+                    self.update_counts(self.state_sequence[t], next_state)
+                
+                # Update emission counts for the new state
                 self.update_emission_counts(self.state_sequence[t], observations[t])
+
+            # Optional: Hyperparameter optimization
+            self.optimize_hyperparameters()
+
+        return self.state_sequence
 
     def particle_filtering(self, observations, num_particles=100):
         """
-        Perform infinite-state particle filtering for likelihood computation
+        Perform infinite-state particle filtering for likelihood computation.
         """
         T = len(observations)
+        if T == 0:
+            raise ValueError("Observations cannot be empty")
+
+        # Initialize particles
         particles = [self.initialize_state() for _ in range(num_particles)]
         log_likelihood = 0
 
         for t in range(T):
             weights = []
+
+            # Calculate weights for each particle
             for particle in particles:
+                total_emissions = sum(self.emission_counts.get(particle, {}).values())
                 if observations[t] in self.emission_counts.get(particle, {}):
-                    prob = self.emission_counts[particle][observations[t]] / sum(self.emission_counts[particle].values())
+                    prob = self.emission_counts[particle][observations[t]] / (total_emissions + self.beta0)
                 else:
-                    prob = self.beta0 / (self.beta0 + sum(self.emission_counts.get(particle, {}).values()))
+                    prob = self.beta0 / (total_emissions + self.beta0)
                 weights.append(prob)
 
             weights = np.array(weights)
-            weights /= weights.sum()
 
-            log_likelihood += np.log(weights.sum())
+            # Handle edge case: all weights are zero
+            if weights.sum() == 0:
+                weights = np.ones_like(weights) / len(weights)
+            else:
+                weights /= weights.sum()  # Normalize weights
 
-            resampled_particles = np.random.choice(particles, size=num_particles, p=weights)
-            particles = []
+            # Update log likelihood
+            log_likelihood += np.log(weights.sum() + 1e-10)
 
-            for particle in resampled_particles:
-                next_state = self.sample_next_state(particle)
-                particles.append(next_state)
+            # Resample particles based on weights
+            resampled_particles = np.random.choice(particles, size=num_particles, p=weights, replace=True)
+
+            # Transition to next states
+            particles = [self.sample_next_state(particle) for particle in resampled_particles]
 
         return log_likelihood
 
     def predict(self, initial_state, steps):
         """
-        Predict a sequence of observations starting from an initial state
+        Predict a sequence of observations starting from an initial state.
+
+        Args:
+            initial_state: The state to start the prediction from.
+            steps: The number of observations to predict.
+
+        Returns:
+            A list of predicted observations.
         """
         if steps <= 0:
             raise ValueError("Number of steps must be positive")
         
+        if initial_state not in self.transition_counts:
+            raise ValueError(f"Initial state '{initial_state}' not found in the state space")
 
         state = initial_state
         predictions = []
 
         for _ in range(steps):
+            # Sample emission from the current state
             observation = self.sample_emission(state)
             predictions.append(observation)
+
+            # Transition to the next state
             state = self.sample_next_state(state)
 
         return predictions
